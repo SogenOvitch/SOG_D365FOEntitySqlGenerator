@@ -1,6 +1,6 @@
 # D365 Entity → SQL Generator
 
-A Windows desktop tool (WPF, .NET 8) that reads **Dynamics 365 Finance & Operations** data-entity metadata directly from a local `PackagesLocalDirectory` and generates a ready-to-adapt **T-SQL `SELECT`** that mirrors the entity: the datasource joins, the field-to-column mapping (`Source.Field AS EntityField`), company (`DataAreaId`) filtering, date-effectivity, and per-field import/edit annotations.
+A Windows desktop tool (WPF, .NET 8) that reads **Dynamics 365 Finance & Operations** data-entity metadata directly from a local `PackagesLocalDirectory` and generates a ready-to-adapt **T-SQL `SELECT`** that mirrors the entity: the datasource joins, the field-to-column mapping (`Source.Field AS EntityField`), company (`DataAreaId`) filtering, date-effectivity, per-field import/edit annotations, and a primary-key row index.
 
 It was built to speed up **data migrations into D365** — instead of opening an entity in Visual Studio and hand-writing the joins and field mappings for every entity you need to stage and import, you pick the entity and get the scaffold instantly, then repoint the `FROM` tables to your source/staging database.
 
@@ -26,8 +26,10 @@ It was built to speed up **data migrations into D365** — instead of opening an
   - **Date-effectivity**: `ApplyDateFilter` datasources get `@DateExecution BETWEEN ValidFrom AND ValidTo`.
   - **Fields grouped by datasource**, in tree order, indented by depth, entity field order preserved, blank line between groups.
   - **Computed / view-method fields** flagged and pushed to the end (`NULL AS …`).
+  - **Primary-key row index.** The whole query is wrapped in an outer `SELECT` that adds `ROW_NUMBER() OVER (PARTITION BY <key> ORDER BY <key>) AS RDD_INDEX_DISTINCT` as the first column (from the entity's `PrimaryKey`), followed by `*`. See [Primary-key row index](#primary-key-row-index).
 - **Import annotations.** Fields not importable on create are prefixed **`RDD_`** with a parenthetical reason. A field is flagged when `AllowEditOnCreate = No` in **any** of three places — entity field, staging table field, target (backing) table field — or when its datasource / the entity is read-only.
 - **Tree signalling.** Red nodes for read-only entities, read-only datasources, and entities not enabled for data management (no staging table).
+- **Datasource filters in the tree.** A datasource that carries query ranges or date-effectivity shows a non-checkable, expandable **Filters** subnode listing each filter (e.g. `EmploymentType = Employee`, `@DateExecution BETWEEN ValidFrom AND ValidTo`).
 - **Toggle datasources** on/off with checkboxes: a disabled datasource (and its children) is dimmed in the tree and dropped from the generated SQL, which regenerates instantly.
 - **SQL pane** with syntax highlighting, **Ctrl+F** find (with match count and highlight), **Copy** and **Save as** (`.sql`, defaulting to the entity name).
 - **Dark theme.**
@@ -76,6 +78,27 @@ For each embedded datasource the tool determines the `ON` conditions by, in orde
 5. otherwise a `-- TODO` marker so you can complete it by hand.
 
 **Nested entities** (a datasource whose table is itself another entity) are kept opaque: they are emitted with their own name and fields and a `-- nested entity` comment, on the assumption that you stage those entities beforehand.
+
+## Primary-key row index
+
+The whole generated query is wrapped so the first output column is a deterministic per-key row number, handy for de-duplication and staging:
+
+```sql
+SELECT
+    ROW_NUMBER() OVER(
+        PARTITION BY <primary-key fields> -- Insert key fields here --
+        ORDER BY <primary-key fields> -- Insert order fields here --
+    ) AS RDD_INDEX_DISTINCT,
+    *
+FROM (
+    <the entity query>
+) AS RDD_SOURCE
+```
+
+The key fields come from the entity's `PrimaryKey` → `AxDataEntityViewKey` → `AxDataEntityViewKeyField`, referenced by their **output column name** (so an `RDD_`-prefixed key column stays valid). `PARTITION BY` and `ORDER BY` are both pre-filled with the key fields and keep their placeholder comments so you can adjust the ordering by hand. Edge cases are annotated:
+
+- **No primary key** → `PARTITION BY 1` / `ORDER BY (SELECT NULL)`, flagged `-- Missing primary key index`. (`ORDER BY (SELECT NULL)` is used because SQL Server rejects a constant such as `ORDER BY 1` inside a window `ORDER BY`.)
+- **A key field on a datasource you toggled off** (so its column isn't in the subquery) is kept in `PARTITION BY` and the line is flagged `-- Missing field in primary key index`.
 
 ## Where settings live
 

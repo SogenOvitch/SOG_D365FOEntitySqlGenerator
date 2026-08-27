@@ -26,14 +26,15 @@ public sealed class SqlGenerator
     {
         _disabled = disabledDataSources ?? new HashSet<string>();
 
+        var header = new StringBuilder();
+        WriteHeader(header, entity);
+
         var sb = new StringBuilder();
         var root = entity.RootDataSource;
         var rootAlias = root?.Name ?? "";
         var staging = entity.DataManagementEnabled && entity.StagingTable.Length > 0
             ? _meta.GetTable(entity.StagingTable)
             : null;
-
-        WriteHeader(sb, entity);
 
         // ---- SELECT ----------------------------------------------------------------------------
         // Fields are grouped by their datasource and emitted in datasource tree order (root first,
@@ -42,6 +43,10 @@ public sealed class SqlGenerator
         // fields have no datasource and come last.
         var byDataSource = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         var computed = new List<string>();
+        // Entity field name → its output column alias (with RDD_ where applicable). Used by the
+        // ROW_NUMBER wrapper to reference primary-key columns; fields on disabled datasources are
+        // absent, which the wrapper flags as a missing key field.
+        var outputAlias = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var field in entity.Fields)
         {
@@ -49,6 +54,7 @@ public sealed class SqlGenerator
             {
                 computed.Add($"NULL AS RDD_{field.Name}"
                              + Comment($"computed / unmapped ({field.UnmappedType})"));
+                outputAlias[field.Name] = $"RDD_{field.Name}";
                 continue;
             }
 
@@ -64,6 +70,7 @@ public sealed class SqlGenerator
             if (!byDataSource.TryGetValue(field.DataSource, out var bucket))
                 byDataSource[field.DataSource] = bucket = new List<string>();
             bucket.Add($"{src} AS {dest}{BuildFieldComment(edit)}");
+            outputAlias[field.Name] = dest;
         }
 
         // Assemble groups in datasource tree order, each with its indentation.
@@ -106,6 +113,56 @@ public sealed class SqlGenerator
 
         // ---- WHERE -----------------------------------------------------------------------------
         WriteWhere(sb, entity, root, rootAlias);
+
+        var inner = sb.ToString().TrimEnd();
+        return WrapWithRowNumber(header, inner, entity, outputAlias);
+    }
+
+    /// <summary>
+    /// Wrap the generated query in an outer SELECT that adds a RDD_INDEX_DISTINCT ROW_NUMBER over
+    /// the entity's primary-key fields. With no usable key it falls back to PARTITION BY 1 /
+    /// ORDER BY (SELECT NULL) and flags "Missing primary key index".
+    /// </summary>
+    private static string WrapWithRowNumber(
+        StringBuilder header, string inner, EntityInfo entity, Dictionary<string, string> outputAlias)
+    {
+        string partition, order, endComment = "";
+
+        if (entity.PrimaryKeyFields.Count == 0)
+        {
+            partition = "1";
+            order = "(SELECT NULL)";   // SQL Server rejects a constant (ORDER BY 1) inside OVER()
+            endComment = " -- Missing primary key index";
+        }
+        else
+        {
+            var cols = new List<string>();
+            var missing = false;
+            foreach (var kf in entity.PrimaryKeyFields)
+            {
+                if (outputAlias.TryGetValue(kf, out var alias)) cols.Add(alias);
+                else { cols.Add(kf); missing = true; }   // key field not emitted (datasource off / not found)
+            }
+            partition = string.Join(", ", cols);
+            order = partition;
+            if (missing) endComment = " -- Missing field in primary key index";
+        }
+
+        var sb = new StringBuilder();
+        sb.Append(header);
+        sb.AppendLine("SELECT");
+        sb.AppendLine($"{Ind}ROW_NUMBER() OVER(");
+        sb.AppendLine($"{Ind}{Ind}PARTITION BY {partition} -- Insert key fields here --");
+        sb.AppendLine($"{Ind}{Ind}ORDER BY {order} -- Insert order fields here --");
+        sb.AppendLine($"{Ind}) AS RDD_INDEX_DISTINCT,{endComment}");
+        sb.AppendLine($"{Ind}*");
+        sb.AppendLine("FROM (");
+        foreach (var raw in inner.Split('\n'))
+        {
+            var line = raw.TrimEnd('\r');
+            sb.AppendLine(line.Length == 0 ? "" : Ind + line);
+        }
+        sb.AppendLine(") AS RDD_SOURCE");
 
         return sb.ToString().TrimEnd() + Environment.NewLine;
     }

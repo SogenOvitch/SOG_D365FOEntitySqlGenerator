@@ -14,6 +14,7 @@ public sealed class EntityParser
                    ?? throw new InvalidDataException($"Empty XML: {filePath}");
 
         var stagingTable = root.Val("DataManagementStagingTable");
+        var primaryKey = root.Val("PrimaryKey");
         var entity = new EntityInfo
         {
             Name = root.Val("Name"),
@@ -25,7 +26,20 @@ public sealed class EntityParser
             DataManagementEnabled = root.Bool("DataManagementEnabled", defaultYes: false)
                                     && stagingTable.Length > 0,
             StagingTable = stagingTable,
+            PrimaryKey = primaryKey,
         };
+
+        // Primary key fields: PrimaryKey → Keys/AxDataEntityViewKey[Name] → Fields/AxDataEntityViewKeyField/DataField.
+        if (primaryKey.Length > 0)
+        {
+            var key = root.El("Keys").Els("AxDataEntityViewKey")
+                .FirstOrDefault(k => string.Equals(k.Val("Name"), primaryKey, StringComparison.OrdinalIgnoreCase));
+            foreach (var kf in key.El("Fields").Els("AxDataEntityViewKeyField"))
+            {
+                var df = kf.Val("DataField");
+                if (df.Length > 0) entity.PrimaryKeyFields.Add(df);
+            }
+        }
 
         // Entity fields: the direct child <Fields> whose items are AxDataEntityViewField.
         var fieldsEl = root.Els("Fields")

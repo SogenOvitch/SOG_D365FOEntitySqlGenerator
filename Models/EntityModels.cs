@@ -81,6 +81,12 @@ public sealed class EntityInfo
     public bool DataManagementEnabled { get; init; }
     public string StagingTable { get; init; } = "";
 
+    /// <summary>Name of the primary key (the AxDataEntityViewKey referenced by PrimaryKey).</summary>
+    public string PrimaryKey { get; init; } = "";
+
+    /// <summary>Entity field names that make up the primary key, in order.</summary>
+    public List<string> PrimaryKeyFields { get; } = new();
+
     public List<EntityFieldInfo> Fields { get; } = new();
     public EntityDataSourceInfo? RootDataSource { get; set; }
 
